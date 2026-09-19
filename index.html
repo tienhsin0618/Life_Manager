@@ -119,9 +119,34 @@
       .event-list .schedule-item{grid-template-columns:72px minmax(0,1fr) auto}
     }
     @media(prefers-reduced-motion:reduce){nav button,.linked-item{transition:none}.linked-item:hover{transform:none}}
+    .auth-gate{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:22px;background:linear-gradient(135deg,#f8f5f1,#efe3da)}
+    .auth-gate.hidden{display:none!important}
+    .auth-card{width:min(420px,100%);background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 24px 80px rgba(52,34,28,.16);padding:28px}
+    .auth-card h1{margin:0 0 6px;font-family:"I.Ming","Noto Serif TC","PMingLiU","Songti TC",serif;font-size:27px;letter-spacing:.08em;color:var(--nav)}
+    .auth-card p{margin:0 0 18px;color:var(--muted);font-size:13px;line-height:1.7}
+    .auth-tabs{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:999px;padding:3px;margin-bottom:18px}
+    .auth-tabs button{border:0;border-radius:999px;background:transparent;color:var(--muted);padding:8px;cursor:pointer;font-weight:700}
+    .auth-tabs button.active{background:var(--green);color:#fff}
+    .auth-message{min-height:20px;margin-top:12px;color:var(--red);font-size:12px;line-height:1.5}
+    .auth-card .primary{width:100%;margin-top:4px}
+    .side-bottom button+button{margin-top:8px}
   </style>
 </head>
 <body>
+<div class="auth-gate" id="authGate">
+  <form class="auth-card" id="authForm">
+    <h1>我的生活管理</h1>
+    <p>使用 Email 與密碼登入，資料會保存到你的 Supabase 帳號。</p>
+    <div class="auth-tabs" role="tablist">
+      <button type="button" class="active" data-auth-mode="signin">登入</button>
+      <button type="button" data-auth-mode="signup">註冊</button>
+    </div>
+    <div class="form-row"><label>Email</label><input id="authEmail" type="email" autocomplete="email" required></div>
+    <div class="form-row"><label>密碼</label><input id="authPassword" type="password" autocomplete="current-password" minlength="6" required></div>
+    <button class="primary" id="authSubmit" type="submit">登入</button>
+    <div class="auth-message" id="authMessage"></div>
+  </form>
+</div>
 <div class="app" id="appRoot">
   <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-controls="appSidebar" aria-expanded="false">☰ <span>目錄</span></button>
   <div class="menu-backdrop" id="menuBackdrop" aria-hidden="true"></div>
@@ -133,7 +158,7 @@
       <button data-view="tasks"><span>所有任務</span></button>
       <button data-view="events"><span>所有約會</span></button>
     </nav>
-    <div class="side-bottom"><button id="resetData">重設範例資料</button></div>
+    <div class="side-bottom"><button id="resetData">重設範例資料</button><button id="logoutButton" type="button">登出</button></div>
   </aside>
   <main>
     <header class="topbar">
@@ -176,6 +201,7 @@
 
 <script>
 const KEY='my-life-manager-v1';
+const AUTH_KEY='my-life-manager-auth-v1';
 const SUPABASE_URL='https://ronvlbgwyvnduhjbmfll.supabase.co';
 const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvbnZsYmd3eXZuZHVoamJtZmxsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4MjQ4NjgsImV4cCI6MjEwNTQwMDg2OH0.89kww9bDubCjJ9BdISAsL97JPOWu9m62lb0LbTXaPg8';
 const seed={projects:[],tasks:[],events:[]};
@@ -188,6 +214,7 @@ data.projects=(data.projects||[]).map(p=>({...p,category:p.category||(p.area==='
 data.tasks=(data.tasks||[]).map(t=>({...t,endDate:t.endDate||t.date||'',important:t.important??t.priority==='高',done:!!t.done}));
 data.events=(data.events||[]).map(e=>({...e,category:e.category||'預設',endDate:e.endDate||e.date||'',done:!!e.done}));
 let cloudReady=false,syncQueue=Promise.resolve();
+let authMode='signin',authSession=null;
 const save=()=>{localStorage.setItem(KEY,JSON.stringify(data));if(cloudReady)queueCloudSync()};
 const esc=(s='')=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const localDate=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -215,7 +242,29 @@ function normalizeData(next){
 }
 data=normalizeData(data);
 
-function dbHeaders(extra={}){return {apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${SUPABASE_ANON_KEY}`,...extra}}
+function readAuthSession(){try{return JSON.parse(localStorage.getItem(AUTH_KEY))}catch{return null}}
+function writeAuthSession(session){authSession=session;session?localStorage.setItem(AUTH_KEY,JSON.stringify(session)):localStorage.removeItem(AUTH_KEY)}
+function normalizeAuthResult(result){const session=result?.session||result;return session?.access_token?{...session,expires_at:session.expires_at||Math.floor(Date.now()/1000)+session.expires_in}:null}
+function authToken(){return authSession?.access_token||SUPABASE_ANON_KEY}
+function showAuthGate(show){$('#authGate').classList.toggle('hidden',!show);$('#appRoot').classList.toggle('hidden',show)}
+function setAuthMessage(message,isOk=false){const el=$('#authMessage');el.textContent=message||'';el.style.color=isOk?'#17624b':'var(--red)'}
+async function authRequest(path,body){
+ const res=await fetch(`${SUPABASE_URL}/auth/v1/${path}`,{method:'POST',headers:{apikey:SUPABASE_ANON_KEY,'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const text=await res.text(),json=text?JSON.parse(text):null;
+ if(!res.ok)throw new Error(json?.msg||json?.error_description||json?.message||'登入失敗');
+ return json;
+}
+async function refreshAuthSession(){
+ const saved=readAuthSession();
+ if(!saved?.refresh_token)return null;
+ if(saved.expires_at&&saved.expires_at*1000>Date.now()+60000){writeAuthSession(saved);return saved}
+ const next=await authRequest('token?grant_type=refresh_token',{refresh_token:saved.refresh_token});
+ writeAuthSession(normalizeAuthResult(next));
+ return authSession;
+}
+async function claimLegacyData(){await dbRequest('rpc/claim_legacy_life_manager_data','',{method:'POST',headers:{'Content-Type':'application/json',Prefer:'return=minimal'},body:'{}'})}
+async function signOut(){writeAuthSession(null);cloudReady=false;data=clone(seed);localStorage.removeItem(KEY);render();showAuthGate(true);setAuthMessage('')}
+function dbHeaders(extra={}){return {apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${authToken()}`,...extra}}
 async function dbRequest(table,query='',options={}){
  const res=await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`,{...options,headers:dbHeaders(options.headers||{})});
  if(!res.ok){throw new Error(`${table} ${res.status}: ${await res.text()}`)}
@@ -230,6 +279,8 @@ function toDbTask(t){return {id:String(t.id),project_id:t.project||null,title:t.
 function toDbEvent(e){return {id:String(e.id),title:e.title||'',category:e.category||'預設',start_date:e.date,end_date:e.endDate||e.date,event_time:e.time||null,location:e.location||'',done:!!e.done,completed_at:e.completedAt||null}}
 async function loadCloudData(){
  try{
+  if(!authSession)throw new Error('尚未登入');
+  await claimLegacyData();
   const [projects,tasks,events]=await Promise.all([
    dbRequest('life_projects','?select=*&order=created_at.asc'),
    dbRequest('life_tasks','?select=*&order=start_date.asc.nullslast,created_at.asc'),
@@ -241,7 +292,7 @@ async function loadCloudData(){
   render();
  }catch(error){
   console.error(error);
-  alert('讀取 Supabase 資料失敗，暫時使用本機資料。請確認 API key 與資料表權限。');
+  alert('讀取 Supabase 資料失敗，請重新登入或確認資料表權限。');
  }
 }
 function queueCloudSync(){syncQueue=syncQueue.then(syncCloudData).catch(error=>{console.error(error);alert('同步到 Supabase 失敗，請檢查網路或資料表權限。')})}
@@ -315,6 +366,8 @@ function openTaskForm(t=null,projectId=''){const pid=t?.project||projectId;if(!p
 
 const appRoot=$('#appRoot'),mobileMenuToggle=$('#mobileMenuToggle'),menuBackdrop=$('#menuBackdrop');
 function setMobileMenu(open){appRoot.classList.toggle('menu-open',open);document.body.classList.toggle('menu-open',open);mobileMenuToggle.setAttribute('aria-expanded',String(open));mobileMenuToggle.innerHTML=open?'× <span>關閉</span>':'☰ <span>目錄</span>';menuBackdrop.setAttribute('aria-hidden',String(!open));if(open)$('#appSidebar nav button.active')?.focus()}
+$$('[data-auth-mode]').forEach(b=>b.onclick=()=>{authMode=b.dataset.authMode;$$('[data-auth-mode]').forEach(x=>x.classList.toggle('active',x.dataset.authMode===authMode));$('#authSubmit').textContent=authMode==='signin'?'登入':'註冊';$('#authPassword').autocomplete=authMode==='signin'?'current-password':'new-password';setAuthMessage('')});
+$('#authForm').onsubmit=async e=>{e.preventDefault();const email=$('#authEmail').value.trim(),password=$('#authPassword').value;$('#authSubmit').disabled=true;setAuthMessage(authMode==='signin'?'登入中...':'建立帳號中...',true);try{const path=authMode==='signin'?'token?grant_type=password':'signup';const result=await authRequest(path,{email,password}),session=normalizeAuthResult(result);if(!session){setAuthMessage('帳號已建立，請先到信箱完成驗證後再登入。',true);return}writeAuthSession(session);showAuthGate(false);setAuthMessage('');await loadCloudData()}catch(error){setAuthMessage(error.message||'登入失敗')}finally{$('#authSubmit').disabled=false}};
 mobileMenuToggle.onclick=()=>setMobileMenu(!appRoot.classList.contains('menu-open'));
 menuBackdrop.onclick=()=>setMobileMenu(false);
 window.addEventListener('resize',()=>{if(window.innerWidth>620)setMobileMenu(false)});
@@ -347,8 +400,10 @@ $('#taskForm').onsubmit=e=>{e.preventDefault();const id=$('#taskId').value,date=
 
 document.addEventListener('click',e=>{const open=e.target.closest('[data-open-project]');if(open&&!e.target.closest('button')){selectedProject=open.dataset.openProject;renderProjectDetail();$('#projectDetail').scrollIntoView({behavior:'smooth',block:'start'});return}const close=e.target.closest('[data-close-detail]');if(close){selectedProject='';renderProjectDetail();return}const add=e.target.closest('[data-add-task]');if(add){openTaskForm(null,add.dataset.addTask);return}const check=e.target.closest('[data-check]');if(check){const t=data.tasks.find(x=>String(x.id)===check.dataset.check);if(t){t.done=!t.done;t.completedAt=t.done?new Date().toISOString():'';save();render()}return}const ep=e.target.closest('[data-edit-project]');if(ep){openProjectForm(project(ep.dataset.editProject));return}const dp=e.target.closest('[data-delete-project]');if(dp){const p=project(dp.dataset.deleteProject),count=data.tasks.filter(t=>String(t.project)===String(p.id)).length;if(confirm(`刪除「${p.name}」及其 ${count} 個任務？`)){data.projects=data.projects.filter(x=>String(x.id)!==String(p.id));data.tasks=data.tasks.filter(t=>String(t.project)!==String(p.id));save();render()}return}const et=e.target.closest('[data-edit-task]');if(et){openTaskForm(data.tasks.find(x=>String(x.id)===et.dataset.editTask));return}const dt=e.target.closest('[data-delete-task]');if(dt&&confirm('確定刪除這個任務？')){data.tasks=data.tasks.filter(x=>String(x.id)!==dt.dataset.deleteTask);save();render();return}const ee=e.target.closest('[data-edit-event]');if(ee){openEventForm(data.events.find(x=>String(x.id)===ee.dataset.editEvent));return}const de=e.target.closest('[data-delete-event]');if(de&&confirm('確定刪除這個約會？')){data.events=data.events.filter(x=>String(x.id)!==de.dataset.deleteEvent);save();render()}});
 $('#resetData').onclick=()=>{if(confirm('這會清空目前畫面上的專案、任務與約會，並同步到 Supabase。確定要清空嗎？')){data=clone(seed);selectedProject='';selectedEvent='';save();render()}};
+$('#logoutButton').onclick=()=>signOut();
 
-const now=new Date(),weekText=['日','一','二','三','四','五','六'][now.getDay()];$('#dateLine').textContent=`${now.getFullYear()}.${String(now.getMonth()+1).padStart(2,'0')}.${String(now.getDate()).padStart(2,'0')} ${weekText}`;render();loadCloudData();
+async function initApp(){const now=new Date(),weekText=['日','一','二','三','四','五','六'][now.getDay()];$('#dateLine').textContent=`${now.getFullYear()}.${String(now.getMonth()+1).padStart(2,'0')}.${String(now.getDate()).padStart(2,'0')} ${weekText}`;render();showAuthGate(true);try{const session=await refreshAuthSession();if(session){showAuthGate(false);await loadCloudData()}}catch(error){console.error(error);writeAuthSession(null);showAuthGate(true)}}
+initApp();
 </script>
 </body>
 </html>
