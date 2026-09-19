@@ -176,22 +176,19 @@
 
 <script>
 const KEY='my-life-manager-v1';
-const seed={projects:[],tasks:[],events:[
- {id:101,title:'與朋友晚餐',date:'2026-07-05',time:'18:30',location:'待確認'},
- {id:102,title:'運動',date:'2026-07-06',time:'19:00',location:'健身房'},
- {id:103,title:'做臉預約',date:'2026-07-08',time:'14:00',location:'美容工作室'}
-]};
+const SUPABASE_URL='https://ronvlbgwyvnduhjbmfll.supabase.co';
+const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJvbnZsYmd3eXZuZHVoamJtZmxsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4MjQ4NjgsImV4cCI6MjEwNTQwMDg2OH0.89kww9bDubCjJ9BdISAsL97JPOWu9m62lb0LbTXaPg8';
+const seed={projects:[],tasks:[],events:[]};
 
 const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const clone=o=>JSON.parse(JSON.stringify(o));
 function load(){try{return JSON.parse(localStorage.getItem(KEY))||clone(seed)}catch{return clone(seed)}}
 let data=load(),currentView='today',taskFilter='unscheduled',eventFilter='all',selectedProject='',selectedEvent='',calDate=new Date();
-const PROJECT_RESET='2026-07-04-clear-projects-v1';
-if(data.projectReset!==PROJECT_RESET){data.projects=[];data.tasks=[];data.projectReset=PROJECT_RESET;localStorage.setItem(KEY,JSON.stringify(data))}
 data.projects=(data.projects||[]).map(p=>({...p,category:p.category||(p.area==='學習'?'學習':p.area==='工作'?'工作':p.area==='生活'?'生活':'預設'),icon:p.icon||'◇'}));
 data.tasks=(data.tasks||[]).map(t=>({...t,endDate:t.endDate||t.date||'',important:t.important??t.priority==='高',done:!!t.done}));
 data.events=(data.events||[]).map(e=>({...e,category:e.category||'預設',endDate:e.endDate||e.date||'',done:!!e.done}));
-const save=()=>localStorage.setItem(KEY,JSON.stringify(data));
+let cloudReady=false,syncQueue=Promise.resolve();
+const save=()=>{localStorage.setItem(KEY,JSON.stringify(data));if(cloudReady)queueCloudSync()};
 const esc=(s='')=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const localDate=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const today=()=>localDate(new Date());
@@ -208,6 +205,57 @@ function isThisWeek(start,end=start){if(!start)return false;const[a,b]=weekRange
 function categoryIcon(c){return c==='工作'?'▣':c==='生活'?'○':c==='學習'?'△':'◇'}
 function categoryClass(c){return c==='工作'?'work':c==='生活'?'life':c==='學習'?'study':'default'}
 function displayCategory(c){return c||'預設'}
+
+function normalizeData(next){
+ next=next||clone(seed);
+ next.projects=(next.projects||[]).map(p=>({...p,id:String(p.id),category:p.category||(p.area==='學習'?'學習':p.area==='工作'?'工作':p.area==='生活'?'生活':'預設'),status:p.status||'規劃中',start:p.start||'',deadline:p.deadline||'',desc:p.desc||'',icon:p.icon||categoryIcon(p.category)}));
+ next.tasks=(next.tasks||[]).map(t=>({...t,id:String(t.id),project:String(t.project||''),date:t.date||'',endDate:t.endDate||t.date||'',important:t.important??t.priority==='高',done:!!t.done,completedAt:t.completedAt||''}));
+ next.events=(next.events||[]).map(e=>({...e,id:String(e.id),category:e.category||'預設',date:e.date||'',endDate:e.endDate||e.date||'',time:(e.time||'').slice(0,5),location:e.location||'',done:!!e.done,completedAt:e.completedAt||''}));
+ return next;
+}
+data=normalizeData(data);
+
+function dbHeaders(extra={}){return {apikey:SUPABASE_ANON_KEY,Authorization:`Bearer ${SUPABASE_ANON_KEY}`,...extra}}
+async function dbRequest(table,query='',options={}){
+ const res=await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`,{...options,headers:dbHeaders(options.headers||{})});
+ if(!res.ok){throw new Error(`${table} ${res.status}: ${await res.text()}`)}
+ const text=await res.text();
+ return text?JSON.parse(text):null;
+}
+function fromDbProject(p){return {id:String(p.id),name:p.name,category:p.category||'預設',status:p.status||'規劃中',start:p.start_date||'',deadline:p.deadline||'',desc:p.description||'',icon:p.icon||categoryIcon(p.category)}}
+function fromDbTask(t){return {id:String(t.id),title:t.title,project:String(t.project_id||''),date:t.start_date||'',endDate:t.end_date||t.start_date||'',important:!!t.important,done:!!t.done,completedAt:t.completed_at||''}}
+function fromDbEvent(e){return {id:String(e.id),title:e.title,category:e.category||'預設',date:e.start_date||'',endDate:e.end_date||e.start_date||'',time:(e.event_time||'').slice(0,5),location:e.location||'',done:!!e.done,completedAt:e.completed_at||''}}
+function toDbProject(p){return {id:String(p.id),name:p.name||'',category:p.category||'預設',status:p.status||'規劃中',start_date:p.start||null,deadline:p.deadline||null,description:p.desc||'',icon:p.icon||categoryIcon(p.category)}}
+function toDbTask(t){return {id:String(t.id),project_id:t.project||null,title:t.title||'',start_date:t.date||null,end_date:t.endDate||t.date||null,important:!!t.important,done:!!t.done,completed_at:t.completedAt||null}}
+function toDbEvent(e){return {id:String(e.id),title:e.title||'',category:e.category||'預設',start_date:e.date,end_date:e.endDate||e.date,event_time:e.time||null,location:e.location||'',done:!!e.done,completed_at:e.completedAt||null}}
+async function loadCloudData(){
+ try{
+  const [projects,tasks,events]=await Promise.all([
+   dbRequest('life_projects','?select=*&order=created_at.asc'),
+   dbRequest('life_tasks','?select=*&order=start_date.asc.nullslast,created_at.asc'),
+   dbRequest('life_events','?select=*&order=start_date.asc,event_time.asc.nullslast')
+  ]);
+  data=normalizeData({projects:projects.map(fromDbProject),tasks:tasks.map(fromDbTask),events:events.map(fromDbEvent)});
+  cloudReady=true;
+  localStorage.setItem(KEY,JSON.stringify(data));
+  render();
+ }catch(error){
+  console.error(error);
+  alert('讀取 Supabase 資料失敗，暫時使用本機資料。請確認 API key 與資料表權限。');
+ }
+}
+function queueCloudSync(){syncQueue=syncQueue.then(syncCloudData).catch(error=>{console.error(error);alert('同步到 Supabase 失敗，請檢查網路或資料表權限。')})}
+async function deleteAllRows(table){await dbRequest(table,'?id=neq.__never__',{method:'DELETE',headers:{Prefer:'return=minimal'}})}
+async function insertRows(table,rows){if(!rows.length)return;await dbRequest(table,'?on_conflict=id',{method:'POST',headers:{'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(rows)})}
+async function syncCloudData(){
+ const snapshot=normalizeData(clone(data));
+ await deleteAllRows('life_events');
+ await deleteAllRows('life_tasks');
+ await deleteAllRows('life_projects');
+ await insertRows('life_projects',snapshot.projects.map(toDbProject));
+ await insertRows('life_tasks',snapshot.tasks.map(toDbTask));
+ await insertRows('life_events',snapshot.events.map(toDbEvent));
+}
 
 function taskHTML(t){const p=project(t.project);return `<div class="task ${t.done?'done':''}"><div class="check ${t.done?'done':''}" data-check="${t.id}" title="切換完成狀態"></div><div><div class="item-title">${esc(t.title)}</div><div class="item-meta">${esc(p?.name||'未分類專案')} · ${fmtRange(t.date,t.endDate)}</div></div><div class="item-actions">${t.important?'<span class="important">重要</span>':''}<button class="icon-btn" data-edit-task="${t.id}">編輯</button><button class="icon-btn danger" data-delete-task="${t.id}">刪除</button></div></div>`}
 function eventScheduleHTML(e){return `<div class="schedule-item today-entry linked-item ${e.done?'done':''}" data-edit-today-event="${e.id}" role="button" tabindex="0"><button class="check event-check ${e.done?'done':''}" data-check-event="${e.id}" type="button" aria-label="${e.done?'標記為未完成':'標記為完成'}"></button><div class="schedule-time">${e.time||'全天'}</div><div><div class="item-title">${esc(e.title)}</div><div class="item-meta">約會 · ${esc(displayCategory(e.category))}${e.location?` · ${esc(e.location)}`:''}</div></div><span></span></div>`}
@@ -298,9 +346,9 @@ $('#eventForm').onsubmit=e=>{e.preventDefault();const id=$('#eventId').value,dat
 $('#taskForm').onsubmit=e=>{e.preventDefault();const id=$('#taskId').value,date=$('#taskDate').value,item={title:$('#taskTitle').value.trim(),project:$('#taskProject').value,date,endDate:date?($('#taskEndDate').value||date):'',important:$('#taskImportant').checked};if(item.endDate&&item.endDate<date){alert('截止日期不能早於起始日期。');return}if(id)Object.assign(data.tasks.find(x=>String(x.id)===id),item);else data.tasks.push({...item,id:Date.now(),done:false});save();closeModals();render()};
 
 document.addEventListener('click',e=>{const open=e.target.closest('[data-open-project]');if(open&&!e.target.closest('button')){selectedProject=open.dataset.openProject;renderProjectDetail();$('#projectDetail').scrollIntoView({behavior:'smooth',block:'start'});return}const close=e.target.closest('[data-close-detail]');if(close){selectedProject='';renderProjectDetail();return}const add=e.target.closest('[data-add-task]');if(add){openTaskForm(null,add.dataset.addTask);return}const check=e.target.closest('[data-check]');if(check){const t=data.tasks.find(x=>String(x.id)===check.dataset.check);if(t){t.done=!t.done;t.completedAt=t.done?new Date().toISOString():'';save();render()}return}const ep=e.target.closest('[data-edit-project]');if(ep){openProjectForm(project(ep.dataset.editProject));return}const dp=e.target.closest('[data-delete-project]');if(dp){const p=project(dp.dataset.deleteProject),count=data.tasks.filter(t=>String(t.project)===String(p.id)).length;if(confirm(`刪除「${p.name}」及其 ${count} 個任務？`)){data.projects=data.projects.filter(x=>String(x.id)!==String(p.id));data.tasks=data.tasks.filter(t=>String(t.project)!==String(p.id));save();render()}return}const et=e.target.closest('[data-edit-task]');if(et){openTaskForm(data.tasks.find(x=>String(x.id)===et.dataset.editTask));return}const dt=e.target.closest('[data-delete-task]');if(dt&&confirm('確定刪除這個任務？')){data.tasks=data.tasks.filter(x=>String(x.id)!==dt.dataset.deleteTask);save();render();return}const ee=e.target.closest('[data-edit-event]');if(ee){openEventForm(data.events.find(x=>String(x.id)===ee.dataset.editEvent));return}const de=e.target.closest('[data-delete-event]');if(de&&confirm('確定刪除這個約會？')){data.events=data.events.filter(x=>String(x.id)!==de.dataset.deleteEvent);save();render()}});
-$('#resetData').onclick=()=>{if(confirm('要恢復最初的範例資料嗎？你新增的資料會被清除。')){data=clone(seed);selectedProject='';selectedEvent='';save();render()}};
+$('#resetData').onclick=()=>{if(confirm('這會清空目前畫面上的專案、任務與約會，並同步到 Supabase。確定要清空嗎？')){data=clone(seed);selectedProject='';selectedEvent='';save();render()}};
 
-const now=new Date(),weekText=['日','一','二','三','四','五','六'][now.getDay()];$('#dateLine').textContent=`${now.getFullYear()}.${String(now.getMonth()+1).padStart(2,'0')}.${String(now.getDate()).padStart(2,'0')} ${weekText}`;save();render();
+const now=new Date(),weekText=['日','一','二','三','四','五','六'][now.getDay()];$('#dateLine').textContent=`${now.getFullYear()}.${String(now.getMonth()+1).padStart(2,'0')}.${String(now.getDate()).padStart(2,'0')} ${weekText}`;render();loadCloudData();
 </script>
 </body>
 </html>
